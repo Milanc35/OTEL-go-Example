@@ -1,0 +1,150 @@
+version: '3.9'
+
+x-logging: &default-logging
+  driver: loki
+  options:
+    loki-url: 'http://localhost:3100/api/prom/push'
+    loki-pipeline-stages: |
+      - multiline:
+          firstline: '^\d{4}-\d{2}-\d{2} \d{1,2}:\d{2}:\d{2}'
+          max_wait_time: 3s
+      - regex:
+          expression: '^(?P<time>\d{4}-\d{2}-\d{2} \d{1,2}:\d{2}:\d{2},d{3}) (?P<message>(?s:.*))$$'
+
+services:
+
+  kafka-1:
+    container_name: kafka-1
+    image: confluentinc/cp-kafka
+    hostname: kafka
+    ports:
+      - '9092:9092'
+      # - '29092:29092'
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,PLAINTEXT_HOST://kafka:29092
+      LISTENERS: PLAINTEXT://0.0.0.0:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    depends_on:
+      - zookeeper
+    networks:
+      -  main-sys-docker-network
+
+  zookeeper:
+    container_name: zookeeper
+    image: zookeeper
+    # ports:
+    #   - '2181:2181'
+    networks:
+      -  main-sys-docker-network
+
+  console:
+    container_name: redpanda-console
+    image: docker.redpanda.com/redpandadata/console:v2.7.1
+    entrypoint: /bin/sh
+    command: -c 'echo "$$CONSOLE_CONFIG_FILE" > /tmp/config.yml; /app/console'
+    environment:
+      CONFIG_FILEPATH: /tmp/config.yml
+      CONSOLE_CONFIG_FILE: |
+        kafka:
+          brokers: ["kafka-1:29092"]
+          schemaRegistry:
+            enabled: false
+            urls: ["http://redpanda-0:8081"]
+        redpanda:
+          adminApi:
+            enabled: false
+            urls: ["http://redpanda-0:9644"]
+    ports:
+      - 8080:8080
+    depends_on:
+      - kafka-1
+    networks:
+      -  main-sys-docker-network
+    logging: *default-logging
+
+  notification:
+    build:
+      context: .
+      dockerfile: Dockerfile.notification
+    environment:
+      - ELASTIC_APM_SERVER_URL=${ELASTIC_APM_SERVER_URL}
+      - ELASTIC_APM_SECRET_TOKEN=${ELASTIC_APM_SECRET_TOKEN}
+      - ELASTIC_APM_SERVICE_NAME=notification-service
+      - ELASTIC_APM_ENVIRONMENT=tracing-test
+      - ELASTIC_APM_LOG_FILE=stdout
+      - ELASTIC_APM_LOG_LEVEL=debug
+      - KAFKA_TOPIC=payment-topic
+      - KAFKA_BROKER_URL=kafka:29092
+    depends_on:
+      - kafka-1
+    logging: *default-logging
+
+  order:
+    build:
+      context: .
+      dockerfile: Dockerfile.order
+    ports:
+      - "8088:8088"
+    environment:
+      - PORT=:8088
+      - SERVICE_NAME=order-service
+      - ENVIRONMENT=dev
+      - LOG_FILE=stdout
+      - LOG_LEVEL=debug
+      - PAYMENT_URL=http://payment:8089
+      - KAFKA_TOPIC=order-topic
+      - KAFKA_BROKER_URL=kafka:29092
+    depends_on:
+      - kafka-1
+    networks:
+      - main-sys-docker-network
+    logging: *default-logging
+
+  payment:
+    build:
+      context: .
+      dockerfile: Dockerfile.payment
+    ports:
+      - "8089:8089"
+    environment:
+      - PORT=:8089
+      - ELASTIC_APM_SERVER_URL=${ELASTIC_APM_SERVER_URL}
+      - ELASTIC_APM_SECRET_TOKEN=${ELASTIC_APM_SECRET_TOKEN}
+      - ELASTIC_APM_SERVICE_NAME=payment-service
+      - ELASTIC_APM_ENVIRONMENT=tracing-test
+      - ELASTIC_APM_LOG_FILE=stdout
+      - ELASTIC_APM_LOG_LEVEL=debug
+      - KAFKA_TOPIC=order-topic
+      - KAFKA_PAYMENT_TOPIC=payment-topic
+      - KAFKA_BROKER_URL=kafka:29092
+    depends_on:
+      - order
+    networks:
+      - main-sys-docker-network
+    logging: *default-logging
+
+  report:
+    build:
+      context: .
+      dockerfile: Dockerfile.report
+    environment:
+      - ELASTIC_APM_SERVER_URL=${ELASTIC_APM_SERVER_URL}
+      - ELASTIC_APM_SECRET_TOKEN=${ELASTIC_APM_SECRET_TOKEN}
+      - ELASTIC_APM_SERVICE_NAME=report-service
+      - ELASTIC_APM_ENVIRONMENT=tracing-test
+      - ELASTIC_APM_LOG_FILE=stdout
+      - ELASTIC_APM_LOG_LEVEL=debug
+      - KAFKA_TOPIC=payment-topic
+      - KAFKA_BROKER_URL=kafka:29092
+    depends_on:
+      - kafka-1
+    networks:
+      - main-sys-docker-network
+    logging: *default-logging
+
+networks:
+  main-sys-docker-network:
+    external: true
